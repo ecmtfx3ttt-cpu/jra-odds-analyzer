@@ -8,65 +8,22 @@ st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザ�
 
 # --- タイトル ---
 st.title("🏇 JRAオッズ断層アナライザー")
-st.markdown("PC・スマホ両対応版です。データを貼り付けて「分析開始」ボタンを押してください。")
+st.markdown("PC・スマホ両対応。データを貼り付けて「分析開始」を押してください。")
 
 # ==========================================
-# 共通関数: レース情報抽出 & Excel出力
+# 関数定義
 # ==========================================
-def extract_race_info(text):
-    # パターン1: "1回中山9日 5レース" (PC)
-    # パターン2: "1回中山8日1R" (スマホ)
-    match = re.search(r'(\d+回\s*\S+?\s*\d+日\s*\d+(?:レース|R))', text)
-    if match:
-        return match.group(1)
-    return None
 
-def to_excel(df, selected_labels, sheet_name="オッズ分析"):
-    output = io.BytesIO()
-    df_excel = df.copy()
-    
-    # 「注目」列を追加
-    if '選択用ラベル' in df_excel.columns:
-        df_excel.insert(0, '注目', df_excel['選択用ラベル'].apply(lambda x: '〇' if x in selected_labels else ''))
-        df_excel = df_excel.drop(columns=['選択用ラベル'])
-    else:
-        df_excel.insert(0, '注目', '')
-
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_excel.to_excel(writer, index=False, sheet_name=sheet_name)
-    return output.getvalue()
-
-# スタイリング関数（共通）
-def style_red_bold(val):
-    if pd.isna(val): return ''
-    if isinstance(val, (int, float)) and val < 0:
-        return 'color: red; font-weight: bold'
-    return ''
-
-# ==========================================
-# ロジックA: 単勝・複勝処理 (スマホ対応版)
-# ==========================================
+@st.cache_data
 def process_win_place_data(text):
     data = []
-    
-    # --- 正規表現パターン定義 ---
-    
-    # パターンA (PC版): 順位, 枠, 馬番, 馬名, 単勝, 複勝
-    # 例: 1  1  1  サントマーレ  2.6  1.1-1.2
     regex_pc = r'(\d{1,2})\s+(\d{1,8})\s+(\d{1,2})\s+([^\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
-    
-    # パターンB (スマホ版): 順位, 馬番, 馬名(改行含む), 単勝, 複勝
-    # 特徴: 枠がない。馬名にスペースや改行が入る可能性があるが、JRA馬名は基本的にカタカナ
-    # 例: 1 16 \n ムーンブランシュ \n 1.9 1.1-1.4
     regex_mobile = r'(\d{1,2})\s+(\d{1,2})\s+([^\d\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
 
-    # まずPCパターンで試す
     matches_pc = re.findall(regex_pc, text)
     matches_mobile = re.findall(regex_mobile, text)
     
-    # マッチ数が多い方を採用する
     if len(matches_pc) >= len(matches_mobile) and len(matches_pc) > 0:
-        # PC版データとして処理
         for match in matches_pc:
             try:
                 data.append({
@@ -78,30 +35,25 @@ def process_win_place_data(text):
                     "複勝下限": float(match[5]),
                     "複勝上限": float(match[6])
                 })
-            except ValueError:
-                continue
+            except ValueError: continue
     elif len(matches_mobile) > 0:
-        # スマホ版データとして処理 (枠がないのでハイフンにする)
         for match in matches_mobile:
             try:
                 data.append({
                     "順": int(match[0]),
-                    "枠": "-",  # スマホ版には枠データがない
+                    "枠": "-",
                     "馬番": int(match[1]),
-                    "馬名": match[2].strip(), # 改行などを除去
+                    "馬名": match[2].strip(),
                     "単勝": float(match[3]),
                     "複勝下限": float(match[4]),
                     "複勝上限": float(match[5])
                 })
-            except ValueError:
-                continue
+            except ValueError: continue
             
-    if not data:
-        return None, None
+    if not data: return None, None
 
     df = pd.DataFrame(data)
     
-    # --- 計算ロジック ---
     df['差'] = df['単勝'].diff()
     df['比'] = df['単勝'] / df['単勝'].shift(1)
     df['比差'] = df['比'].diff()
@@ -120,17 +72,11 @@ def process_win_place_data(text):
         '累積比差', '累積比', '累積', '比差', '比', '差', '単勝', 
         '馬番', '複勝下限', '複勝上限', '下差', '上差', '順', '馬名', '選択用ラベル'
     ]
-    # 枠がある場合はカラムに含めるか検討、今回は表示簡略化のため計算には使わない
-    
     return df[cols], avg_win_odds
 
-# ==========================================
-# ロジックB: 馬単処理
-# ==========================================
+@st.cache_data
 def process_umatan_data(text):
     data = []
-    # パターン: 順位 + 組番(数字-数字) + オッズ
-    # スマホの改行にも対応できるよう \s+ を使用
     pattern = r'(\d+)\s+(\d+)-(\d+)\s+(\d+\.\d+)'
     matches = re.findall(pattern, text)
     
@@ -142,11 +88,9 @@ def process_umatan_data(text):
             h2 = int(match[2])
             odds = float(match[3])
             temp_list.append({"順": rank, "組1": h1, "組2": h2, "表": odds})
-        except ValueError:
-            continue
+        except ValueError: continue
     
-    if not temp_list:
-        return None, None
+    if not temp_list: return None, None
 
     odds_map = {(item['組1'], item['組2']): item['表'] for item in temp_list}
 
@@ -181,89 +125,130 @@ def process_umatan_data(text):
     ]
     return df[cols], avg_odds
 
+def extract_race_info(text):
+    match = re.search(r'(\d+回\s*\S+?\s*\d+日\s*\d+(?:レース|R))', text)
+    if match: return match.group(1)
+    return None
+
+def to_excel(df, selected_labels, sheet_name="オッズ分析"):
+    output = io.BytesIO()
+    df_excel = df.copy()
+    if '選択用ラベル' in df_excel.columns:
+        df_excel.insert(0, '注目', df_excel['選択用ラベル'].apply(lambda x: '〇' if x in selected_labels else ''))
+        df_excel = df_excel.drop(columns=['選択用ラベル'])
+    else:
+        df_excel.insert(0, '注目', '')
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_excel.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
+def style_red_bold(val):
+    if pd.isna(val): return ''
+    if isinstance(val, (int, float)) and val < 0:
+        return 'color: red; font-weight: bold'
+    return ''
+
+# フィルター用ロジック（前後2行を含む）
+def filter_dataframe_with_context(df, mask, context=2):
+    # 条件に合う行のインデックスを取得
+    target_indices = df.index[mask].tolist()
+    if not target_indices:
+        return df.iloc[[]] # 空のDFを返す
+    
+    # 前後context行を含める
+    indices_to_keep = set()
+    for idx in target_indices:
+        start = max(0, idx - context)
+        end = min(len(df), idx + context + 1)
+        for i in range(start, end):
+            indices_to_keep.add(i)
+            
+    return df.iloc[sorted(list(indices_to_keep))]
+
 # ==========================================
-# メイン画面レイアウト (フォーム化)
+# メイン画面レイアウト
 # ==========================================
 
-# st.form を使って、「分析開始」ボタンを押すまでリロードされないようにする
 with st.form(key='analysis_form'):
     col1, col2 = st.columns(2)
-
     with col1:
-        st.subheader("① 単勝・複勝（人気順）")
-        text_win = st.text_area("「単勝・複勝」のページ全体を貼り付け", height=150, key="input_win")
-
+        st.subheader("① 単勝・複勝")
+        text_win = st.text_area("データ貼り付け", height=100, key="input_win")
     with col2:
-        st.subheader("② 馬単（人気順）")
-        text_umatan = st.text_area("「馬単（人気順）」のページ全体を貼り付け", height=150, key="input_umatan")
-
-    # フォームの送信ボタン（これが決定ボタンになる）
+        st.subheader("② 馬単")
+        text_umatan = st.text_area("データ貼り付け", height=100, key="input_umatan")
+    
     submit_button = st.form_submit_button(label='🚀 分析開始 (決定)')
 
 st.markdown("---")
 
-# ボタンが押されたときだけ実行
 if submit_button:
-    # レース情報の抽出と表示
     race_info_text = None
+    if text_win: race_info_text = extract_race_info(text_win)
+    elif text_umatan: race_info_text = extract_race_info(text_umatan)
+    if race_info_text: st.info(f"📍 {race_info_text}")
+
+    # --- 1. 単勝・複勝 ---
     if text_win:
-        race_info_text = extract_race_info(text_win)
-    elif text_umatan:
-        race_info_text = extract_race_info(text_umatan)
-
-    if race_info_text:
-        st.info(f"📍 {race_info_text}")
-
-    # --- 分析結果の表示エリア ---
-
-    # 1. 単勝・複勝の処理
-    if text_win:
-        st.markdown("### 📊 単勝・複勝 分析結果")
+        st.markdown("### 📊 単勝・複勝")
         df_win, avg_win = process_win_place_data(text_win)
         
         if df_win is not None:
-            col_metrics, col_select = st.columns([1, 3])
-            col_metrics.metric("平均単勝オッズ", f"{avg_win:.2f}")
+            show_only_red_win = st.checkbox("🔥 チャンス（断層前後）のみ表示", value=False, key="filter_win")
             
-            selected_horses_win = col_select.multiselect(
-                "注目馬を選択 (単勝)", df_win['選択用ラベル'].tolist(), key="sel_win"
+            if show_only_red_win:
+                mask = (df_win['累積比差'] < 0) | (df_win['比差'] < 0) | (df_win['下差'] < 0)
+                df_display_win = filter_dataframe_with_context(df_win, mask)
+            else:
+                df_display_win = df_win
+
+            st.metric("平均単勝オッズ", f"{avg_win:.2f}")
+            
+            selected_horses_win = st.multiselect(
+                "注目馬を選択", df_win['選択用ラベル'].tolist(), key="sel_win"
             )
 
             def highlight_win(row):
                 if row['選択用ラベル'] in selected_horses_win:
                     return ['background-color: #ffffcc'] * len(row)
                 return [''] * len(row)
+            
+            row_count = len(df_display_win)
+            final_height = min((row_count + 1) * 35 + 3, 600)
 
             st.dataframe(
-                df_win.style
+                df_display_win.style
                 .format("{:.2f}", subset=['累積比差', '累積比', '累積', '比差', '比', '差', '単勝', '複勝下限', '複勝上限', '下差', '上差'])
                 .applymap(style_red_bold, subset=['累積比差', '比差', '下差', '上差'])
                 .apply(highlight_win, axis=1)
                 .highlight_null(color='transparent'),
-                height=(len(df_win) + 1) * 35 + 3,
+                height=final_height,
                 column_order=[c for c in df_win.columns if c != '選択用ラベル']
             )
             
-            # Excel DL
             excel_win = to_excel(df_win, selected_horses_win, "単勝複勝")
-            st.download_button("📥 単勝・複勝Excelをダウンロード", excel_win, "odds_win_place.xlsx")
-        else:
-            st.error("単勝・複勝データを解析できませんでした。PC形式かスマホ形式か確認してください。")
+            st.download_button("📥 Excel DL", excel_win, "odds_win_place.xlsx")
 
-    if text_win and text_umatan:
-        st.markdown("---")
+    if text_win and text_umatan: st.markdown("---")
 
-    # 2. 馬単の処理
+    # --- 2. 馬単 ---
     if text_umatan:
-        st.markdown("### 📊 馬単 分析結果 (表・裏比較)")
+        st.markdown("### 📊 馬単")
         df_uma, avg_uma = process_umatan_data(text_umatan)
         
         if df_uma is not None:
-            col_metrics_u, col_select_u = st.columns([1, 3])
-            col_metrics_u.metric("平均馬単オッズ", f"{avg_uma:.2f}")
+            show_only_red_uma = st.checkbox("🔥 チャンス（断層前後）のみ表示", value=True, key="filter_uma")
             
-            selected_horses_uma = col_select_u.multiselect(
-                "注目買い目を選択 (馬単)", df_uma['選択用ラベル'].tolist(), key="sel_uma"
+            if show_only_red_uma:
+                mask = (df_uma['比差'] < 0) | (df_uma['裏差'] < 0)
+                df_display_uma = filter_dataframe_with_context(df_uma, mask)
+            else:
+                df_display_uma = df_uma
+
+            st.metric("平均馬単オッズ", f"{avg_uma:.2f}")
+            
+            selected_horses_uma = st.multiselect(
+                "注目買い目を選択", df_uma['選択用ラベル'].tolist(), key="sel_uma"
             )
 
             def highlight_uma(row):
@@ -271,21 +256,20 @@ if submit_button:
                     return ['background-color: #ffffcc'] * len(row)
                 return [''] * len(row)
 
+            row_count = len(df_display_uma)
+            final_height = min((row_count + 1) * 35 + 3, 600)
+
             st.dataframe(
-                df_uma.style
+                df_display_uma.style
                 .format("{:.2f}", subset=['比差', '表比', '表差', '表', '裏', '裏差', '裏比', '裏比差'])
                 .applymap(style_red_bold, subset=['比差', '表差', '裏差', '裏比差'])
                 .apply(highlight_uma, axis=1)
                 .highlight_null(color='transparent'),
-                height=(len(df_uma) + 1) * 35 + 3,
+                height=final_height,
                 column_order=[c for c in df_uma.columns if c != '選択用ラベル']
             )
             
-            # Excel DL
             excel_uma = to_excel(df_uma, selected_horses_uma, "馬単")
-            st.download_button("📥 馬単Excelをダウンロード", excel_uma, "odds_umatan.xlsx")
-        else:
-            st.error("馬単データを解析できませんでした。")
+            st.download_button("📥 Excel DL", excel_uma, "odds_umatan.xlsx")
 else:
-    # まだボタンが押されていない状態
     st.info("👆 ボックスにデータを貼り付けて、「分析開始 (決定)」ボタンを押してください")
