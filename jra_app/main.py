@@ -6,7 +6,6 @@ import io
 # ページ設定
 st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザー")
 
-# --- タイトル ---
 st.title("🏇 JRAオッズ断層アナライザー")
 st.markdown("PC・スマホ両対応。データを貼り付けて「分析開始」を押してください。")
 
@@ -17,12 +16,16 @@ st.markdown("PC・スマホ両対応。データを貼り付けて「分析開�
 @st.cache_data
 def process_win_place_data(text):
     data = []
+    # PC版: 順位, 枠, 馬番, 馬名, 単勝, 複勝
     regex_pc = r'(\d{1,2})\s+(\d{1,8})\s+(\d{1,2})\s+([^\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
-    regex_mobile = r'(\d{1,2})\s+(\d{1,2})\s+([^\d\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
+    
+    # スマホ版 (改良): 馬名にスペースが含まれてもOKなように [^\d]+ (数字以外) でマッチさせる
+    regex_mobile = r'(\d{1,2})\s+(\d{1,2})\s+([^\d]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
 
     matches_pc = re.findall(regex_pc, text)
     matches_mobile = re.findall(regex_mobile, text)
     
+    # マッチ数が多い方を採用
     if len(matches_pc) >= len(matches_mobile) and len(matches_pc) > 0:
         for match in matches_pc:
             try:
@@ -30,7 +33,7 @@ def process_win_place_data(text):
                     "順": int(match[0]),
                     "枠": match[1],
                     "馬番": int(match[2]),
-                    "馬名": match[3],
+                    "馬名": match[3].strip(),
                     "単勝": float(match[4]),
                     "複勝下限": float(match[5]),
                     "複勝上限": float(match[6])
@@ -43,7 +46,7 @@ def process_win_place_data(text):
                     "順": int(match[0]),
                     "枠": "-",
                     "馬番": int(match[1]),
-                    "馬名": match[2].strip(),
+                    "馬名": match[2].strip(), # 余計なスペースや改行を除去
                     "単勝": float(match[3]),
                     "複勝下限": float(match[4]),
                     "複勝上限": float(match[5])
@@ -148,21 +151,16 @@ def style_red_bold(val):
         return 'color: red; font-weight: bold'
     return ''
 
-# フィルター用ロジック（前後2行を含む）
-def filter_dataframe_with_context(df, mask, context=2):
-    # 条件に合う行のインデックスを取得
+def filter_dataframe_with_context(df, mask, context=1):
     target_indices = df.index[mask].tolist()
     if not target_indices:
-        return df.iloc[[]] # 空のDFを返す
-    
-    # 前後context行を含める
+        return df.iloc[[]]
     indices_to_keep = set()
     for idx in target_indices:
         start = max(0, idx - context)
         end = min(len(df), idx + context + 1)
         for i in range(start, end):
             indices_to_keep.add(i)
-            
     return df.iloc[sorted(list(indices_to_keep))]
 
 # ==========================================
@@ -177,6 +175,12 @@ with st.form(key='analysis_form'):
     with col2:
         st.subheader("② 馬単")
         text_umatan = st.text_area("データ貼り付け", height=100, key="input_umatan")
+    
+    # 閾値スライダーをフォーム内に入れるか迷いますが、再計算トリガーになるのでフォームの外に出す手もありますが
+    # ここでは「設定を決めてから分析開始」という流れにします
+    st.markdown("---")
+    st.markdown("⚙️ **感度設定** (何も出ないときは右へ、ノイズが多いときは左へ)")
+    threshold_win = st.slider("単勝・複勝の断層基準 (デフォルト: -0.10)", -0.50, 0.00, -0.10, 0.01)
     
     submit_button = st.form_submit_button(label='🚀 分析開始 (決定)')
 
@@ -194,11 +198,18 @@ if submit_button:
         df_win, avg_win = process_win_place_data(text_win)
         
         if df_win is not None:
-            show_only_red_win = st.checkbox("🔥 チャンス（断層前後）のみ表示", value=False, key="filter_win")
+            # 読み取り頭数を確認（デバッグ用）
+            st.caption(f"読み取り成功: {len(df_win)}頭")
+            
+            show_only_red_win = st.checkbox("🔥 断層のみ表示", value=True, key="filter_win")
             
             if show_only_red_win:
-                mask = (df_win['累積比差'] < 0) | (df_win['比差'] < 0) | (df_win['下差'] < 0)
-                df_display_win = filter_dataframe_with_context(df_win, mask)
+                mask = (df_win['累積比差'] <= threshold_win) | (df_win['比差'] <= threshold_win) | (df_win['下差'] <= threshold_win)
+                df_display_win = filter_dataframe_with_context(df_win, mask, context=1)
+                
+                if len(df_display_win) == 0:
+                    st.warning(f"⚠️ 基準値 ({threshold_win}) 以下の断層は見つかりませんでした。（全行表示します）")
+                    df_display_win = df_win
             else:
                 df_display_win = df_win
 
@@ -214,7 +225,7 @@ if submit_button:
                 return [''] * len(row)
             
             row_count = len(df_display_win)
-            final_height = min((row_count + 1) * 35 + 3, 600)
+            final_height = min((row_count + 1) * 35 + 3, 500)
 
             st.dataframe(
                 df_display_win.style
@@ -228,6 +239,8 @@ if submit_button:
             
             excel_win = to_excel(df_win, selected_horses_win, "単勝複勝")
             st.download_button("📥 Excel DL", excel_win, "odds_win_place.xlsx")
+        else:
+            st.error("❌ データを解析できませんでした。コピーした範囲が正しいか、または「馬名」の列が含まれているか確認してください。")
 
     if text_win and text_umatan: st.markdown("---")
 
@@ -237,11 +250,15 @@ if submit_button:
         df_uma, avg_uma = process_umatan_data(text_umatan)
         
         if df_uma is not None:
-            show_only_red_uma = st.checkbox("🔥 チャンス（断層前後）のみ表示", value=True, key="filter_uma")
+            show_only_red_uma = st.checkbox("🔥 断層のみ表示", value=True, key="filter_uma")
             
             if show_only_red_uma:
-                mask = (df_uma['比差'] < 0) | (df_uma['裏差'] < 0)
-                df_display_uma = filter_dataframe_with_context(df_uma, mask)
+                # 馬単用の閾値は -1.0 固定（あるいは必要ならスライダー追加）
+                mask = (df_uma['比差'] <= -0.1) | (df_uma['裏差'] <= -1.0)
+                df_display_uma = filter_dataframe_with_context(df_uma, mask, context=1)
+                if len(df_display_uma) == 0:
+                     st.warning("⚠️ 大きな断層は見つかりませんでした（全行表示します）")
+                     df_display_uma = df_uma
             else:
                 df_display_uma = df_uma
 
@@ -257,7 +274,7 @@ if submit_button:
                 return [''] * len(row)
 
             row_count = len(df_display_uma)
-            final_height = min((row_count + 1) * 35 + 3, 600)
+            final_height = min((row_count + 1) * 35 + 3, 500)
 
             st.dataframe(
                 df_display_uma.style
