@@ -2,13 +2,19 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import io
 
 # ページ設定
-st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザー")
+st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザー Ver.2")
 
 # --- タイトル ---
-st.title("🏇 JRAオッズ断層アナライザー")
-st.markdown("JRA公式サイトのデータを貼り付けてください。単勝・複勝と馬単を同時に分析できます。")
+st.title("🏇 JRAオッズ断層アナライザー Ver.2")
+st.markdown("""
+**使い方**: JRA公式サイトのオッズページからデータをコピーして貼り付けてください。
+- **「分析開始」**を押すとデータが保持されます。
+- プルダウンで馬を選択してもデータは消えません。
+- 右上の設定でテーブルのソート順を変更できます。
+""")
 
 # ==========================================
 # 共通関数: レース情報抽出
@@ -19,19 +25,32 @@ def extract_race_info(text):
         return match.group(1)
     return None
 
-def to_copy_text(df, selected_labels=None):
+def to_csv_text(df, selected_labels=None):
+    """
+    データフレームをCSV形式（カンマ区切り）のテキストに変換する。
+    選択された馬には「注目」列に「〇」をつける。
+    """
     df_copy = df.copy()
-    if selected_labels is not None and '選択用ラベル' in df_copy.columns:
-        df_copy.insert(0, '注目', df_copy['選択用ラベル'].apply(lambda x: '〇' if x in selected_labels else ''))
-    elif '選択用ラベル' in df_copy.columns:
+    
+    # 選択用ラベルなどの表示用列を除外してコピー用データを作成
+    cols_to_exclude = ['選択用ラベル', 'style_class'] # 内部処理用カラムがあれば除外
+    cols = [c for c in df_copy.columns if c not in cols_to_exclude]
+    df_copy = df_copy[cols]
+
+    # 選択馬のフラグ付け（ラベル列を使って判定）
+    # 元のdfにある '選択用ラベル' を使って判定する必要があるため、除外前に処理
+    if selected_labels is not None and '選択用ラベル' in df.columns:
+        # 判定ロジック
+        is_selected = df['選択用ラベル'].isin(selected_labels)
+        df_copy.insert(0, '注目', is_selected.apply(lambda x: '〇' if x else ''))
+    else:
         df_copy.insert(0, '注目', '')
-        
-    if '選択用ラベル' in df_copy.columns:
-        df_copy = df_copy.drop(columns=['選択用ラベル'])
-        
-    return df_copy.to_csv(sep='\t', index=False)
+
+    # CSV形式（カンマ区切り、インデックスなし）
+    return df_copy.to_csv(sep=',', index=False)
 
 def style_red_bold(val):
+    """負の値を赤太字にする"""
     if pd.isna(val): return ''
     if isinstance(val, (int, float)) and val < 0:
         return 'color: red; font-weight: bold'
@@ -41,19 +60,14 @@ def style_red_bold(val):
 # カオス指数計算ロジック
 # ==========================================
 def calculate_chaos_stats(odds_series):
-    """
-    オッズ列からカオス指数（エントロピー）とレベル判定を返す
-    """
     odds = pd.to_numeric(odds_series, errors='coerce').dropna()
     odds = odds[odds > 0]
     
     if len(odds) < 2:
         return 0.0, "判定不可"
 
-    # 支持率(確率)に変換して正規化
     probs = 1 / odds
     norm_probs = probs / probs.sum()
-    # エントロピー算出
     entropy = -np.sum(norm_probs * np.log(norm_probs + 1e-9))
     
     if entropy < 1.71:
@@ -74,14 +88,15 @@ def calculate_chaos_stats(odds_series):
 # ==========================================
 def process_win_place_data(text):
     data = []
-    pattern = r'(\d{1,2})\s+(\S+)\s+(\d{1,2})\s+([^\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
+    # 正規表現: 順位 枠 番 馬名 単勝 複勝下限-上限
+    pattern = r'(\d{1,2})\s+(\d{1})\s+(\d{1,2})\s+([^\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
     matches = re.findall(pattern, text)
 
     for match in matches:
         try:
             data.append({
                 "順": int(match[0]),
-                "枠": match[1],
+                "枠": int(match[1]),
                 "馬番": int(match[2]),
                 "馬名": match[3],
                 "単勝": float(match[4]),
@@ -92,10 +107,11 @@ def process_win_place_data(text):
             continue
             
     if not data:
-        return None, None, None, None, None
+        return None, 0, "", 0, ""
 
     df = pd.DataFrame(data)
     
+    # 計算
     df['差'] = df['単勝'].diff()
     df['比'] = df['単勝'] / df['単勝'].shift(1)
     df['比差'] = df['比'].diff()
@@ -107,11 +123,11 @@ def process_win_place_data(text):
     df['下差'] = df['複勝下限'].diff()
     df['上差'] = df['複勝上限'].diff()
 
-    # ★単勝カオス指数
+    # カオス指数
     chaos_val_win, chaos_lvl_win = calculate_chaos_stats(df['単勝'])
-    # ★複勝カオス指数（複勝下限を使用）
     chaos_val_place, chaos_lvl_place = calculate_chaos_stats(df['複勝下限'])
 
+    # 表示・選択用ラベル
     df['選択用ラベル'] = df['馬番'].astype(str) + ": " + df['馬名']
 
     cols = [
@@ -125,6 +141,7 @@ def process_win_place_data(text):
 # ==========================================
 def process_umatan_data(text):
     data = []
+    # 正規表現: 順位 馬番-馬番 オッズ
     pattern = r'(\d+)\s+(\d+)-(\d+)\s+(\d+\.\d+)'
     matches = re.findall(pattern, text)
     
@@ -142,6 +159,7 @@ def process_umatan_data(text):
     if not temp_list:
         return None
 
+    # 裏オッズの検索用マップを作成
     odds_map = {(item['組1'], item['組2']): item['表'] for item in temp_list}
 
     final_data = []
@@ -156,17 +174,23 @@ def process_umatan_data(text):
 
     df = pd.DataFrame(final_data)
 
+    # 人気順（デフォルト）での断層計算
+    df = df.sort_values('順')
     df['表差'] = df['表'].diff()
     df['表比'] = df['表'] / df['表'].shift(1)
     df['比差'] = df['表比'].diff()
 
-    df['裏差'] = df['裏'].diff()
+    df['裏差'] = df['裏'].diff() # ここが「裏オッズ自体の断層」
     df['裏比'] = df['裏'] / df['裏'].shift(1)
     df['裏比差'] = df['裏比'].diff()
-
+    
+    # 追加: 表と裏の乖離（アービトラージ的な視点）などは単純比較は難しいが、要望の「裏差」は上記で計算済み
+    
     df['選択用ラベル'] = df['組番'] + " (" + df['表'].astype(str) + "倍)"
 
+    # 表示用カラム整理（組1, 組2はソート用に保持）
     cols = [
+        '組1', '組2', # ソート用（隠してもよいが持っておく）
         '比差', '表比', '表差', '表', 
         '組番', 
         '裏', '裏差', '裏比', '裏比差', 
@@ -175,125 +199,162 @@ def process_umatan_data(text):
     return df[cols]
 
 # ==========================================
-# メイン画面レイアウト
+# メイン画面レイアウト & セッション状態管理
 # ==========================================
 
+# セッションステートの初期化
+if 'data_processed' not in st.session_state:
+    st.session_state.data_processed = False
+    st.session_state.df_win = None
+    st.session_state.df_uma = None
+    st.session_state.race_info = ""
+    # カオス指数系
+    st.session_state.c_win = 0
+    st.session_state.l_win = ""
+    st.session_state.c_plc = 0
+    st.session_state.l_plc = ""
+
+# --- 入力フォーム ---
 with st.form(key='analysis_form'):
     col1, col2 = st.columns(2)
-
     with col1:
         st.subheader("① 単勝・複勝（人気順）")
-        text_win = st.text_area("「単勝・複勝」のページ全体を貼り付け", height=150, key="input_win")
-
+        text_win_input = st.text_area("ページ全体を貼り付け", height=150, key="input_win")
     with col2:
         st.subheader("② 馬単（人気順）")
-        text_umatan = st.text_area("「馬単（人気順）」のページ全体を貼り付け", height=150, key="input_umatan")
+        text_umatan_input = st.text_area("ページ全体を貼り付け", height=150, key="input_umatan")
 
-    submit_button = st.form_submit_button(label='🚀 分析開始')
+    submit_button = st.form_submit_button(label='🚀 分析実行')
 
-st.markdown("---")
-
+# --- 分析処理（ボタン押下時） ---
 if submit_button:
-    race_info_text = None
-    if text_win:
-        race_info_text = extract_race_info(text_win)
-    elif text_umatan:
-        race_info_text = extract_race_info(text_umatan)
+    # リセット
+    st.session_state.df_win = None
+    st.session_state.df_uma = None
+    
+    # レース情報取得
+    info_text = None
+    if text_win_input:
+        info_text = extract_race_info(text_win_input)
+    elif text_umatan_input:
+        info_text = extract_race_info(text_umatan_input)
+    st.session_state.race_info = info_text
 
-    if race_info_text:
-        st.info(f"📍 {race_info_text}")
+    # 単勝処理
+    if text_win_input:
+        df_w, c_w, l_w, c_p, l_p = process_win_place_data(text_win_input)
+        st.session_state.df_win = df_w
+        st.session_state.c_win = c_w
+        st.session_state.l_win = l_w
+        st.session_state.c_plc = c_p
+        st.session_state.l_plc = l_p
 
-    df_win_res = None
-    df_uma_res = None
-    selected_horses_win = []
-    selected_horses_uma = []
+    # 馬単処理
+    if text_umatan_input:
+        df_u = process_umatan_data(text_umatan_input)
+        st.session_state.df_uma = df_u
 
-    # --- 1. 単勝・複勝の処理 ---
-    if text_win:
+    st.session_state.data_processed = True
+
+# --- 結果表示（データがある場合常に表示） ---
+if st.session_state.data_processed:
+    st.markdown("---")
+    if st.session_state.race_info:
+        st.info(f"📍 {st.session_state.race_info}")
+
+    # 1. 単勝・複勝セクション
+    if st.session_state.df_win is not None:
         st.markdown("### 📊 単勝・複勝 分析結果")
-        df_win_res, c_win, l_win, c_plc, l_plc = process_win_place_data(text_win)
+        df_win = st.session_state.df_win
+
+        # 指数表示
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
+        c1.metric("単勝カオス", f"{st.session_state.c_win:.3f}")
+        c1.caption(st.session_state.l_win)
+        c2.metric("複勝カオス", f"{st.session_state.c_plc:.3f}")
+        c2.caption(st.session_state.l_plc)
         
-        if df_win_res is not None:
-            # カオス指数表示（単勝・複勝の両方）
-            c1, c2, c3, c4, c_sel = st.columns([1, 1, 1, 1, 2])
-            c1.metric("単勝カオス", f"{c_win:.3f}")
-            c1.caption(l_win)
-            
-            c2.metric("複勝カオス", f"{c_plc:.3f}")
-            c2.caption(l_plc)
-            
-            # ズレ判定
-            if c_plc > c_win + 0.1:
-                 c3.warning("⚠️複勝が混戦")
-            elif c_win > c_plc + 0.1:
-                 c3.error("🔥単勝が混戦")
-            
-            selected_horses_win = c_sel.multiselect(
-                "注目馬を選択", df_win_res['選択用ラベル'].tolist(), key="sel_win"
-            )
+        # 注目馬選択（st.formの外に出したのでリセットされない）
+        selected_horses_win = c4.multiselect(
+            "注目馬を選択（行がハイライトされます）", 
+            df_win['選択用ラベル'].tolist(), 
+            key="sel_win"
+        )
 
-            def highlight_win(row):
-                if row['選択用ラベル'] in selected_horses_win:
-                    return ['background-color: #ffffcc'] * len(row)
-                return [''] * len(row)
+        # ハイライト関数
+        def highlight_win(row):
+            if row['選択用ラベル'] in selected_horses_win:
+                return ['background-color: #ffffcc; color: black; font-weight: bold'] * len(row)
+            return [''] * len(row)
 
-            st.dataframe(
-                df_win_res.style
-                .format("{:.2f}", subset=['累積比差', '累積比', '累積', '比差', '比', '差', '単勝', '複勝下限', '複勝上限', '下差', '上差'])
-                .applymap(style_red_bold, subset=['累積比差', '比差', '下差', '上差'])
-                .apply(highlight_win, axis=1)
-                .highlight_null(color='transparent'),
-                height=(len(df_win_res) + 1) * 35 + 3,
-                column_order=[c for c in df_win_res.columns if c != '選択用ラベル']
-            )
-            
-            with st.expander("📋 単勝・複勝のコピー用データを表示"):
-                tsv_win = to_copy_text(df_win_res, selected_horses_win)
-                st.code(tsv_win, language='csv')
-        else:
-            st.error("データ解析エラー")
+        # データフレーム表示
+        display_cols = [c for c in df_win.columns if c not in ['選択用ラベル', 'style_class']]
+        st.dataframe(
+            df_win.style
+            .format("{:.2f}", subset=['累積比差', '累積比', '累積', '比差', '比', '差', '単勝', '複勝下限', '複勝上限', '下差', '上差'])
+            .applymap(style_red_bold, subset=['累積比差', '比差', '下差', '上差'])
+            .apply(highlight_win, axis=1),
+            height=(len(df_win) + 1) * 35 + 3,
+            column_order=display_cols
+        )
 
-    if text_win and text_umatan:
-        st.markdown("---")
+        # コピー用CSV
+        with st.expander("📋 単勝・複勝 CSVデータ（コピー用）"):
+            st.code(to_csv_text(df_win, selected_horses_win), language='csv')
 
-    # --- 2. 馬単の処理 ---
-    if text_umatan:
-        st.markdown("### 📊 馬単 分析結果 (表・裏比較)")
-        df_uma_res = process_umatan_data(text_umatan)
+    st.markdown("---")
+
+    # 2. 馬単セクション
+    if st.session_state.df_uma is not None:
+        st.markdown("### 📊 馬単 分析結果")
+        df_uma = st.session_state.df_uma.copy()
+
+        col_sort, col_sel = st.columns([1, 2])
         
-        if df_uma_res is not None:
-            col_spacer, col_select_u = st.columns([1, 3])
-            
-            selected_horses_uma = col_select_u.multiselect(
-                "注目買い目を選択", df_uma_res['選択用ラベル'].tolist(), key="sel_uma"
-            )
+        # ソート切り替え
+        sort_mode = col_sort.radio("並び順", ["人気順 (断層チェック)", "馬番順 (裏オッズ確認)"], horizontal=True)
 
-            def highlight_uma(row):
-                if row['選択用ラベル'] in selected_horses_uma:
-                    return ['background-color: #ffffcc'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(
-                df_uma_res.style
-                .format("{:.2f}", subset=['比差', '表比', '表差', '表', '裏', '裏差', '裏比', '裏比差'])
-                .applymap(style_red_bold, subset=['比差', '表差', '裏差', '裏比差'])
-                .apply(highlight_uma, axis=1)
-                .highlight_null(color='transparent'),
-                height=(len(df_uma_res) + 1) * 35 + 3,
-                column_order=[c for c in df_uma_res.columns if c != '選択用ラベル']
-            )
-            
-            with st.expander("📋 馬単のコピー用データを表示"):
-                tsv_uma = to_copy_text(df_uma_res, selected_horses_uma)
-                st.code(tsv_uma, language='csv')
+        if sort_mode == "馬番順 (裏オッズ確認)":
+            # 馬番（組1 -> 組2）でソート
+            df_uma = df_uma.sort_values(['組1', '組2'])
+            # 馬番順の場合は「断層（前の順位との差）」は意味をなさないことが多いので、
+            # 単純にオッズが見やすいカラム順にする
+            display_order = ['組番', '表', '裏', '裏差', '順']
+            st.caption("※馬番順表示では、各馬から相手へのオッズ（表）とその裏オッズ、裏オッズの断層を表示します。")
         else:
-            st.error("データ解析エラー")
+            # 人気順
+            df_uma = df_uma.sort_values('順')
+            display_order = ['比差', '表比', '表差', '表', '組番', '裏', '裏差', '裏比', '裏比差', '順']
 
-    # --- 3. まとめてコピー ---
-    if df_win_res is not None and df_uma_res is not None:
+        # 注目買い目
+        selected_horses_uma = col_sel.multiselect(
+            "注目買い目を選択", 
+            df_uma['選択用ラベル'].tolist(), 
+            key="sel_uma"
+        )
+
+        def highlight_uma(row):
+            if row['選択用ラベル'] in selected_horses_uma:
+                return ['background-color: #ffffcc; color: black; font-weight: bold'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(
+            df_uma.style
+            .format("{:.1f}", subset=['比差', '表比', '表差', '表', '裏', '裏差', '裏比', '裏比差'])
+            .applymap(style_red_bold, subset=['比差', '表差', '裏差', '裏比差'])
+            .apply(highlight_uma, axis=1)
+            .highlight_null(color='transparent'),
+            height=500, # 行数が多いので固定高さ+スクロール
+            column_order=display_order
+        )
+
+        # コピー用CSV
+        with st.expander("📋 馬単 CSVデータ（コピー用）"):
+            st.code(to_csv_text(df_uma, selected_horses_uma), language='csv')
+
+    # 3. まとめてコピー
+    if st.session_state.df_win is not None and st.session_state.df_uma is not None:
         st.markdown("---")
         st.subheader("📥 全データをまとめてコピー")
-        with st.container():
-            st.info("右上のコピーボタンで全データをコピーできます。")
-            tsv_all = "[単勝・複勝]\n" + to_copy_text(df_win_res, selected_horses_win) + "\n\n[馬単]\n" + to_copy_text(df_uma_res, selected_horses_uma)
-            st.code(tsv_all, language='csv')
+        csv_all = "[単勝・複勝]\n" + to_csv_text(st.session_state.df_win, selected_horses_win) + "\n\n[馬単]\n" + to_csv_text(st.session_state.df_uma, selected_horses_uma)
+        st.text_area("全データCSV", csv_all, height=200)
