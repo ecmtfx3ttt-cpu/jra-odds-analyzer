@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
-import numpy as np  # 追加: 計算用
+import numpy as np
 import re
-import io
 
 # ページ設定
 st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザー")
@@ -12,7 +11,7 @@ st.title("🏇 JRAオッズ断層アナライザー")
 st.markdown("JRA公式サイトのデータを貼り付けてください。単勝・複勝と馬単を同時に分析できます。")
 
 # ==========================================
-# 共通関数: レース情報抽出 & Excel出力
+# 共通関数: レース情報抽出
 # ==========================================
 def extract_race_info(text):
     match = re.search(r'(\d+回\s*\S+?\s*\d+日\s*\d+レース)', text)
@@ -20,20 +19,21 @@ def extract_race_info(text):
         return match.group(1)
     return None
 
-def to_excel(df, selected_labels, sheet_name="オッズ分析"):
-    output = io.BytesIO()
-    df_excel = df.copy()
-    
+# データフレームをクリップボードコピー用テキスト（TSV）に変換する関数
+def to_copy_text(df, selected_labels=None):
+    df_copy = df.copy()
     # 「注目」列を追加
-    if '選択用ラベル' in df_excel.columns:
-        df_excel.insert(0, '注目', df_excel['選択用ラベル'].apply(lambda x: '〇' if x in selected_labels else ''))
-        df_excel = df_excel.drop(columns=['選択用ラベル'])
-    else:
-        df_excel.insert(0, '注目', '')
-
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_excel.to_excel(writer, index=False, sheet_name=sheet_name)
-    return output.getvalue()
+    if selected_labels is not None and '選択用ラベル' in df_copy.columns:
+        df_copy.insert(0, '注目', df_copy['選択用ラベル'].apply(lambda x: '〇' if x in selected_labels else ''))
+    elif '選択用ラベル' in df_copy.columns:
+        df_copy.insert(0, '注目', '')
+        
+    # 不要な列（表示用ラベルなど）を削除
+    if '選択用ラベル' in df_copy.columns:
+        df_copy = df_copy.drop(columns=['選択用ラベル'])
+        
+    # タブ区切りテキストとして返す（Excel貼り付け用）
+    return df_copy.to_csv(sep='\t', index=False)
 
 # スタイリング関数（共通）
 def style_red_bold(val):
@@ -63,7 +63,7 @@ def calculate_chaos_stats(odds_series):
     # 3. エントロピー（カオス指数）算出
     entropy = -np.sum(norm_probs * np.log(norm_probs + 1e-9))
     
-    # 4. レベル判定 (以前定義した閾値を使用)
+    # 4. レベル判定
     if entropy < 1.71:
         level = "Lv1 (鉄板)"
     elif entropy < 1.90:
@@ -101,7 +101,7 @@ def process_win_place_data(text):
             continue
             
     if not data:
-        return None, None, None, None  # 戻り値を増やしました
+        return None, None, None
 
     df = pd.DataFrame(data)
     
@@ -116,9 +116,9 @@ def process_win_place_data(text):
     df['下差'] = df['複勝下限'].diff()
     df['上差'] = df['複勝上限'].diff()
 
-    avg_win_odds = df['単勝'].sum() / len(df)
-    
-    # ★追加: カオス指数の計算
+    # ★平均オッズ計算は削除しました
+
+    # ★カオス指数の計算
     chaos_val, chaos_lvl = calculate_chaos_stats(df['単勝'])
 
     df['選択用ラベル'] = df['馬番'].astype(str) + ": " + df['馬名']
@@ -127,7 +127,7 @@ def process_win_place_data(text):
         '累積比差', '累積比', '累積', '比差', '比', '差', '単勝', 
         '馬番', '複勝下限', '複勝上限', '下差', '上差', '順', '馬名', '選択用ラベル'
     ]
-    return df[cols], avg_win_odds, chaos_val, chaos_lvl
+    return df[cols], chaos_val, chaos_lvl
 
 # ==========================================
 # ロジックB: 馬単処理
@@ -150,7 +150,7 @@ def process_umatan_data(text):
             continue
     
     if not temp_list:
-        return None, None
+        return None
 
     odds_map = {(item['組1'], item['組2']): item['表'] for item in temp_list}
 
@@ -174,7 +174,6 @@ def process_umatan_data(text):
     df['裏比'] = df['裏'] / df['裏'].shift(1)
     df['裏比差'] = df['裏比'].diff()
 
-    avg_odds = df['表'].sum() / len(df)
     df['選択用ラベル'] = df['組番'] + " (" + df['表'].astype(str) + "倍)"
 
     cols = [
@@ -183,7 +182,7 @@ def process_umatan_data(text):
         '裏', '裏差', '裏比', '裏比差', 
         '順', '選択用ラベル'
     ]
-    return df[cols], avg_odds
+    return df[cols]
 
 # ==========================================
 # メイン画面レイアウト
@@ -215,24 +214,25 @@ if submit_button:
     if race_info_text:
         st.info(f"📍 {race_info_text}")
 
-    # --- 分析結果の表示エリア ---
+    # 変数初期化（両方コピー用）
+    df_win_res = None
+    df_uma_res = None
+    selected_horses_win = []
+    selected_horses_uma = []
 
-    # 1. 単勝・複勝の処理
+    # --- 1. 単勝・複勝の処理 ---
     if text_win:
         st.markdown("### 📊 単勝・複勝 分析結果")
-        # 戻り値が増えています
-        df_win, avg_win, chaos_val, chaos_lvl = process_win_place_data(text_win)
+        df_win_res, chaos_val, chaos_lvl = process_win_place_data(text_win)
         
-        if df_win is not None:
-            # ★レイアウト変更: メトリクスを3つ並べる
-            col_m1, col_m2, col_m3, col_select = st.columns([1, 1, 1, 3])
-            
-            col_m1.metric("平均単勝オッズ", f"{avg_win:.2f}")
-            col_m2.metric("カオス指数", f"{chaos_val:.3f}")
-            col_m3.metric("判定", chaos_lvl)
+        if df_win_res is not None:
+            # カオス指数と判定のみ表示（平均オッズ削除）
+            col_m1, col_m2, col_select = st.columns([1, 1, 3])
+            col_m1.metric("カオス指数", f"{chaos_val:.3f}")
+            col_m2.metric("判定", chaos_lvl)
             
             selected_horses_win = col_select.multiselect(
-                "注目馬を選択 (単勝)", df_win['選択用ラベル'].tolist(), key="sel_win"
+                "注目馬を選択 (単勝)", df_win_res['選択用ラベル'].tolist(), key="sel_win"
             )
 
             def highlight_win(row):
@@ -241,34 +241,36 @@ if submit_button:
                 return [''] * len(row)
 
             st.dataframe(
-                df_win.style
+                df_win_res.style
                 .format("{:.2f}", subset=['累積比差', '累積比', '累積', '比差', '比', '差', '単勝', '複勝下限', '複勝上限', '下差', '上差'])
                 .applymap(style_red_bold, subset=['累積比差', '比差', '下差', '上差'])
                 .apply(highlight_win, axis=1)
                 .highlight_null(color='transparent'),
-                height=(len(df_win) + 1) * 35 + 3,
-                column_order=[c for c in df_win.columns if c != '選択用ラベル']
+                height=(len(df_win_res) + 1) * 35 + 3,
+                column_order=[c for c in df_win_res.columns if c != '選択用ラベル']
             )
             
-            excel_win = to_excel(df_win, selected_horses_win, "単勝複勝")
-            st.download_button("📥 単勝・複勝Excelをダウンロード", excel_win, "odds_win_place.xlsx")
+            # 単勝コピーエリア
+            with st.expander("📋 単勝・複勝のコピー用データを表示"):
+                st.markdown("右上のコピーアイコンをクリックしてください。")
+                tsv_win = to_copy_text(df_win_res, selected_horses_win)
+                st.code(tsv_win, language='csv')
         else:
             st.error("単勝・複勝データを解析できませんでした。")
 
     if text_win and text_umatan:
         st.markdown("---")
 
-    # 2. 馬単の処理
+    # --- 2. 馬単の処理 ---
     if text_umatan:
         st.markdown("### 📊 馬単 分析結果 (表・裏比較)")
-        df_uma, avg_uma = process_umatan_data(text_umatan)
+        df_uma_res = process_umatan_data(text_umatan)
         
-        if df_uma is not None:
-            col_metrics_u, col_select_u = st.columns([1, 3])
-            col_metrics_u.metric("平均馬単オッズ", f"{avg_uma:.2f}")
+        if df_uma_res is not None:
+            col_spacer, col_select_u = st.columns([1, 3])
             
             selected_horses_uma = col_select_u.multiselect(
-                "注目買い目を選択 (馬単)", df_uma['選択用ラベル'].tolist(), key="sel_uma"
+                "注目買い目を選択 (馬単)", df_uma_res['選択用ラベル'].tolist(), key="sel_uma"
             )
 
             def highlight_uma(row):
@@ -277,16 +279,36 @@ if submit_button:
                 return [''] * len(row)
 
             st.dataframe(
-                df_uma.style
+                df_uma_res.style
                 .format("{:.2f}", subset=['比差', '表比', '表差', '表', '裏', '裏差', '裏比', '裏比差'])
                 .applymap(style_red_bold, subset=['比差', '表差', '裏差', '裏比差'])
                 .apply(highlight_uma, axis=1)
                 .highlight_null(color='transparent'),
-                height=(len(df_uma) + 1) * 35 + 3,
-                column_order=[c for c in df_uma.columns if c != '選択用ラベル']
+                height=(len(df_uma_res) + 1) * 35 + 3,
+                column_order=[c for c in df_uma_res.columns if c != '選択用ラベル']
             )
             
-            excel_uma = to_excel(df_uma, selected_horses_uma, "馬単")
-            st.download_button("📥 馬単Excelをダウンロード", excel_uma, "odds_umatan.xlsx")
+            # 馬単コピーエリア
+            with st.expander("📋 馬単のコピー用データを表示"):
+                st.markdown("右上のコピーアイコンをクリックしてください。")
+                tsv_uma = to_copy_text(df_uma_res, selected_horses_uma)
+                st.code(tsv_uma, language='csv')
         else:
             st.error("馬単データを解析できませんでした。")
+
+    # --- 3. 両方コピー用エリア（両方のデータがある場合のみ表示） ---
+    if df_win_res is not None and df_uma_res is not None:
+        st.markdown("---")
+        st.subheader("📥 全データをまとめてコピー")
+        
+        with st.container():
+            st.info("以下のテキストボックス右上のコピーボタンを押すと、単勝・複勝・馬単の全分析結果を一度にコピーできます（Excel貼り付け推奨）。")
+            
+            tsv_all = ""
+            tsv_all += "[単勝・複勝分析結果]\n"
+            tsv_all += to_copy_text(df_win_res, selected_horses_win)
+            tsv_all += "\n\n"
+            tsv_all += "[馬単分析結果]\n"
+            tsv_all += to_copy_text(df_uma_res, selected_horses_uma)
+            
+            st.code(tsv_all, language='csv')
