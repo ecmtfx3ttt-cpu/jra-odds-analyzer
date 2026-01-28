@@ -5,14 +5,14 @@ import re
 import io
 
 # ページ設定
-st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザー Ver.2.1")
+st.set_page_config(layout="wide", page_title="JRAオッズ断層アナライザー Ver.2.2")
 
 # --- タイトル ---
-st.title("🏇 JRAオッズ断層アナライザー Ver.2.1")
+st.title("🏇 JRAオッズ断層アナライザー Ver.2.2")
 st.markdown("""
 **使い方**: JRA公式サイトのオッズページからデータをコピーして貼り付けてください。
 - **「分析実行」**を押すと解析結果が表示されます。
-- プルダウン操作などをしても結果は消えません。
+- **ハイフン埋め**: 1位の馬など計算できない箇所は「-」で表示されます。
 """)
 
 # ==========================================
@@ -36,6 +36,9 @@ def to_csv_text(df, selected_labels=None):
     else:
         df_copy.insert(0, '注目', '')
 
+    # ★修正点: NaN（計算不可）をハイフンに置換して、カンマ連続を防ぐ
+    df_copy = df_copy.fillna('-')
+    
     return df_copy.to_csv(sep=',', index=False)
 
 def style_red_bold(val):
@@ -67,12 +70,11 @@ def calculate_chaos_stats(odds_series):
     return entropy, level
 
 # ==========================================
-# ロジックA: 単勝・複勝処理 (修正版)
+# ロジックA: 単勝・複勝処理
 # ==========================================
 def process_win_place_data(text):
     data = []
-    # 【修正ポイント】正規表現を柔軟に戻しました
-    # \d{1} ではなく \S+ (空白以外の文字) で枠番を拾うように変更
+    # 柔軟な正規表現
     pattern = r'(\d{1,2})\s+(\S+)\s+(\d{1,2})\s+([^\s]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s*-\s*(\d+\.\d+)'
     matches = re.findall(pattern, text)
 
@@ -80,7 +82,7 @@ def process_win_place_data(text):
         try:
             data.append({
                 "順": int(match[0]),
-                "枠": match[1], # 枠は文字列として保持（数字変換でエラーにならないよう）
+                "枠": match[1],
                 "馬番": int(match[2]),
                 "馬名": match[3],
                 "単勝": float(match[4]),
@@ -115,7 +117,6 @@ def process_win_place_data(text):
         '累積比差', '累積比', '累積', '比差', '比', '差', '単勝', 
         '馬番', '複勝下限', '複勝上限', '下差', '上差', '順', '馬名', '選択用ラベル'
     ]
-    # カラムが存在するか確認してフィルタ（安全策）
     existing_cols = [c for c in cols if c in df.columns]
     return df[existing_cols], chaos_val_win, chaos_lvl_win, chaos_val_place, chaos_lvl_place
 
@@ -180,7 +181,6 @@ def process_umatan_data(text):
 # メイン画面レイアウト
 # ==========================================
 
-# セッション状態の初期化
 if 'data_processed' not in st.session_state:
     st.session_state.data_processed = False
     st.session_state.df_win = None
@@ -205,18 +205,15 @@ with st.form(key='analysis_form'):
 
 # データ処理
 if submit_button:
-    # 初期化
     st.session_state.df_win = None
     st.session_state.df_uma = None
     st.session_state.race_info = ""
 
-    # レース情報
     info_text = None
     if text_win_input: info_text = extract_race_info(text_win_input)
     elif text_umatan_input: info_text = extract_race_info(text_umatan_input)
     st.session_state.race_info = info_text
 
-    # 単勝・複勝 処理
     if text_win_input:
         df_w, c_w, l_w, c_p, l_p = process_win_place_data(text_win_input)
         if df_w is not None:
@@ -226,15 +223,14 @@ if submit_button:
             st.session_state.c_plc = c_p
             st.session_state.l_plc = l_p
         else:
-            st.error("⚠️ 単勝・複勝データの読み取りに失敗しました。コピー範囲を確認してください。")
+            st.error("⚠️ 単勝・複勝データの読み取りに失敗しました。")
 
-    # 馬単 処理
     if text_umatan_input:
         df_u = process_umatan_data(text_umatan_input)
         if df_u is not None:
             st.session_state.df_uma = df_u
         else:
-            st.error("⚠️ 馬単データの読み取りに失敗しました。コピー範囲を確認してください。")
+            st.error("⚠️ 馬単データの読み取りに失敗しました。")
 
     st.session_state.data_processed = True
 
@@ -255,7 +251,6 @@ if st.session_state.data_processed:
         c2.metric("複勝カオス", f"{st.session_state.c_plc:.3f}")
         c2.caption(st.session_state.l_plc)
         
-        # 注目馬選択（ハイライト用）
         selected_horses_win = c4.multiselect(
             "注目馬を選択（ハイライト）", 
             df_win['選択用ラベル'].tolist(), 
@@ -271,13 +266,14 @@ if st.session_state.data_processed:
         
         st.dataframe(
             df_win.style
-            .format("{:.2f}", subset=['累積比差', '累積比', '累積', '比差', '比', '差', '単勝', '複勝下限', '複勝上限', '下差', '上差'])
+            .format("{:.2f}", subset=['累積比差', '累積比', '累積', '比差', '比', '差', '単勝', '複勝下限', '複勝上限', '下差', '上差'], na_rep="-")
             .applymap(style_red_bold, subset=['累積比差', '比差', '下差', '上差'])
             .apply(highlight_win, axis=1),
             height=(len(df_win) + 1) * 35 + 3,
             column_order=display_cols
         )
-
+        
+        # 個別コピーボタン（st.codeを使用）
         with st.expander("📋 単勝・複勝 CSVデータ（コピー用）"):
             st.code(to_csv_text(df_win, selected_horses_win), language='csv')
 
@@ -310,7 +306,7 @@ if st.session_state.data_processed:
 
         st.dataframe(
             df_uma.style
-            .format("{:.1f}", subset=['比差', '表比', '表差', '表', '裏', '裏差', '裏比', '裏比差'])
+            .format("{:.1f}", subset=['比差', '表比', '表差', '表', '裏', '裏差', '裏比', '裏比差'], na_rep="-")
             .applymap(style_red_bold, subset=['比差', '表差', '裏差', '裏比差'])
             .apply(highlight_uma, axis=1)
             .highlight_null(color='transparent'),
@@ -325,5 +321,6 @@ if st.session_state.data_processed:
     if st.session_state.df_win is not None and st.session_state.df_uma is not None:
         st.markdown("---")
         st.subheader("📥 全データCSV")
+        # ★修正点: st.codeを使うことで、右上にワンクリックコピーボタンが表示されます
         csv_all = "[単勝・複勝]\n" + to_csv_text(st.session_state.df_win, selected_horses_win) + "\n\n[馬単]\n" + to_csv_text(st.session_state.df_uma, selected_horses_uma)
-        st.text_area("コピー用", csv_all, height=200)
+        st.code(csv_all, language='csv')
