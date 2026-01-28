@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np  # 追加: 計算用
 import re
 import io
 
@@ -42,6 +43,41 @@ def style_red_bold(val):
     return ''
 
 # ==========================================
+# 追加機能: カオス指数計算ロジック
+# ==========================================
+def calculate_chaos_stats(odds_series):
+    """
+    単勝オッズからカオス指数（エントロピー）とレベル判定を返す
+    """
+    # データ洗浄
+    odds = pd.to_numeric(odds_series, errors='coerce').dropna()
+    odds = odds[odds > 0]
+    
+    if len(odds) < 2:
+        return 0.0, "判定不可"
+
+    # 1. オッズを確率に変換（支持率）
+    probs = 1 / odds
+    # 2. 確率を正規化（合計を1にする）
+    norm_probs = probs / probs.sum()
+    # 3. エントロピー（カオス指数）算出
+    entropy = -np.sum(norm_probs * np.log(norm_probs + 1e-9))
+    
+    # 4. レベル判定 (以前定義した閾値を使用)
+    if entropy < 1.71:
+        level = "Lv1 (鉄板)"
+    elif entropy < 1.90:
+        level = "Lv2 (堅め)"
+    elif entropy < 2.05:
+        level = "Lv3 (標準)"
+    elif entropy < 2.19:
+        level = "Lv4 (混戦)"
+    else:
+        level = "Lv5 (カオス🔥)"
+        
+    return entropy, level
+
+# ==========================================
 # ロジックA: 単勝・複勝処理
 # ==========================================
 def process_win_place_data(text):
@@ -65,7 +101,7 @@ def process_win_place_data(text):
             continue
             
     if not data:
-        return None, None
+        return None, None, None, None  # 戻り値を増やしました
 
     df = pd.DataFrame(data)
     
@@ -81,13 +117,17 @@ def process_win_place_data(text):
     df['上差'] = df['複勝上限'].diff()
 
     avg_win_odds = df['単勝'].sum() / len(df)
+    
+    # ★追加: カオス指数の計算
+    chaos_val, chaos_lvl = calculate_chaos_stats(df['単勝'])
+
     df['選択用ラベル'] = df['馬番'].astype(str) + ": " + df['馬名']
 
     cols = [
         '累積比差', '累積比', '累積', '比差', '比', '差', '単勝', 
         '馬番', '複勝下限', '複勝上限', '下差', '上差', '順', '馬名', '選択用ラベル'
     ]
-    return df[cols], avg_win_odds
+    return df[cols], avg_win_odds, chaos_val, chaos_lvl
 
 # ==========================================
 # ロジックB: 馬単処理
@@ -149,7 +189,6 @@ def process_umatan_data(text):
 # メイン画面レイアウト
 # ==========================================
 
-# ★ここから変更：フォームの中にテキストエリアとボタンを入れる
 with st.form(key='analysis_form'):
     col1, col2 = st.columns(2)
 
@@ -161,12 +200,10 @@ with st.form(key='analysis_form'):
         st.subheader("② 馬単（人気順）")
         text_umatan = st.text_area("「馬単（人気順）」のページ全体を貼り付け", height=150, key="input_umatan")
 
-    # フォーム送信ボタン（これが分析開始ボタンになります）
     submit_button = st.form_submit_button(label='🚀 分析開始')
 
 st.markdown("---")
 
-# ★変更：ボタンが押されたときだけ処理を実行する
 if submit_button:
     # レース情報の抽出と表示
     race_info_text = None
@@ -183,11 +220,16 @@ if submit_button:
     # 1. 単勝・複勝の処理
     if text_win:
         st.markdown("### 📊 単勝・複勝 分析結果")
-        df_win, avg_win = process_win_place_data(text_win)
+        # 戻り値が増えています
+        df_win, avg_win, chaos_val, chaos_lvl = process_win_place_data(text_win)
         
         if df_win is not None:
-            col_metrics, col_select = st.columns([1, 3])
-            col_metrics.metric("平均単勝オッズ", f"{avg_win:.2f}")
+            # ★レイアウト変更: メトリクスを3つ並べる
+            col_m1, col_m2, col_m3, col_select = st.columns([1, 1, 1, 3])
+            
+            col_m1.metric("平均単勝オッズ", f"{avg_win:.2f}")
+            col_m2.metric("カオス指数", f"{chaos_val:.3f}")
+            col_m3.metric("判定", chaos_lvl)
             
             selected_horses_win = col_select.multiselect(
                 "注目馬を選択 (単勝)", df_win['選択用ラベル'].tolist(), key="sel_win"
@@ -208,7 +250,6 @@ if submit_button:
                 column_order=[c for c in df_win.columns if c != '選択用ラベル']
             )
             
-            # Excel DL
             excel_win = to_excel(df_win, selected_horses_win, "単勝複勝")
             st.download_button("📥 単勝・複勝Excelをダウンロード", excel_win, "odds_win_place.xlsx")
         else:
@@ -245,7 +286,6 @@ if submit_button:
                 column_order=[c for c in df_uma.columns if c != '選択用ラベル']
             )
             
-            # Excel DL
             excel_uma = to_excel(df_uma, selected_horses_uma, "馬単")
             st.download_button("📥 馬単Excelをダウンロード", excel_uma, "odds_umatan.xlsx")
         else:
